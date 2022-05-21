@@ -1,0 +1,354 @@
+* Mandlebrot viewer for the TI-99/4A - 9900 CPU
+*
+* Uses 16-bit fixed point, 2.13 plus 1 bit for sign. 
+* This allows from -3.9999 to +3.9999, which is enough range
+* Resolution is 1/8192 (0.0001220703125)
+* For the initial zoom level, we only need 0.013678175
+* That is 112 times needed. If we always zoom double,
+* then we can zoom in 112/56/28/14/7/3.5 6 times before
+* we start to lose accuracy. 
+* One downside is how to display it. Bitmap mode has a
+* limit of 1 color per 8 pixels, so we will have to live
+* with the color clash for now. Black will always be
+* background value, different colors for foreground
+
+* VDP MEMORY MAP
+*
+* 0000	Pattern table/Sprite pattern table (unused)
+* 1800	Screen image table
+* 1B00  Sprite descriptor table (D0 byte only)
+* 1B02  Code
+* 2000	Color table
+* 3800	
+* 4000  						(F18A only)
+* 4800  TOP OF RAM
+
+* Registers:
+* R0 Work				R8  color (iterations)
+* R1 Work				R9	screen x
+* R2 Work				R10 screen y
+* R3 Work				R11	Return address
+* R4 zx*zx				R12	Left/cx
+* R5 zy*zy				R13 Top/cy
+* R6 zx					R14 XSide/x scale
+* R7 zy					R15 Yside/y scale
+
+	DEF MAIN
+
+* Temp vars in scratchpad
+
+SAVEL EQU >8320
+SAVET EQU >8322
+SAVEX EQU >8324
+SAVEY EQU >8326
+SAVERT EQU >8328
+CACHE EQU >832A
+	
+	AORG >6000		* 9900
+	
+		DATA >AA01,>0200,>0000,PROG1,>0000,>0000
+PROG1	DATA >0000,MAIN,>094D
+		TEXT 'ANDLEBMP'
+		EVEN
+		
+MAIN
+	LWPI >8300		* 9900 only
+	LI R0,>1100
+	MOV R0,@CACHE	* init pixel cache
+	LI R1,BMREGS
+	BL @LOADRG
+	BL @SETBM
+	BL @INIT
+		
+MAINLP
+	BL @MANDEL
+
+ENDLP
+	LIMI 2
+	LIMI 0
+	JMP ENDLP
+
+* Setup bitmap mode
+SETBM
+* load the SIT - I am deliberately 
+* letting the user see all this, by the way
+	MOV R11,R3
+	LI R0,>5800
+	BL @VWAD
+	LI R2,3
+NQ# 
+	CLR R1
+LP# 
+	MOVB R1,@>8C00
+	AI R1,>0100
+	JNE LP#
+	DEC R2
+	JNE NQ#	
+* Clear the pattern table
+	LI R0,>4000
+	BL @VWAD
+	CLR R0
+	LI R1,>0C00
+LP#2	
+	MOVB R0,@>8C00
+	MOVB R0,@>8C00
+	DEC R1
+	JNE LP#2
+* clear the color table
+	LI R0,>6000
+	BL @VWAD
+	CLR R0
+	LI R1,>0C00
+LP#3	
+	MOVB R0,@>8C00
+	MOVB R0,@>8C00
+	DEC R1
+	JNE LP#3
+	B *R3
+
+* Setup the mandlebrot	
+INIT
+	LI R12,>C000	* left = -2.0
+	LI R13,>2800	* top = 1.25
+	LI R14,>5000	* xside = 2.5
+	LI R15,>B000	* ysize = -2.5
+	B *R11
+	
+* registers for bitmap
+BMREGS DATA >8002,>81E2,>8206,>83ff,>8403,>8536,>8603,>8700,>5B00,>0000
+
+* load regs list to VDP address, end on >0000 and write >D0 (for sprites)
+* address of table in R1
+LOADRG
+	MOV R11,R3
+LOADLP
+	MOV *R1+,R0
+	JEQ LDRDN
+	BL @VWAD
+	JMP LOADLP
+LDRDN
+	LI R1,>D000
+	MOVB R1,@>8C00
+	B *R3
+
+* VDP Write Address
+VWAD
+	SWPB R0
+	MOVB R0,@>8C02
+	SWPB R0
+	MOVB R0,@>8C02
+	B *R11
+
+SIGNF DATA >8000
+
+SQUARE
+		ABS R0
+		MPY R0,R0		* zx*zx (result in R0,R1, but with 26 bits of decimal!)
+		MOV R0,R2
+		ANDI R2,>F000	* check for overflow
+		JNE OVERF
+		SRL R1,13		* shift down the 3 bits we want to keep from the end (zeroing the rest)
+		SLA R0,3		* shift up the 13 bits we want to keep
+		SOC R1,R0		* merge together for a new 16-bit result
+		B *R11
+OVERF
+		SETO R0			* >FFFF error result
+		B *R11
+
+MANDEL
+		MOV R11,@SAVERT
+		MOV R12,@SAVEL
+		MOV R13,@SAVET
+		MOV R14,@SAVEX
+		MOV R15,@SAVEY
+		
+* XMAX is 256, so we can actually just shift normally (arithmetically) for XSCALE
+		SRA R14,8
+* YMAX is 192, so we'll do it right and divide (no sign adjust needed cause it's whole) for YSCALE
+		CLR R3			* sign flag
+		MOV R15,R1
+		JGT SIGOK
+		JEQ SIGOK
+		ABS R1			* make positive
+		SETO R3			* and remember
+SIGOK		
+		CLR R0			* 32-bit value
+		LI R2,192
+		DIV R2,R0		* result in R0, remainder in R1 (don't care)
+		MOV R0,R15
+		MOV R3,R3		* check sign
+		JEQ SIGOK2
+		NEG R15			* make negative again
+SIGOK2		
+		
+		CLR R10			* Y starts at 0
+YLP
+		MOV @SAVEL,R12	* get left CX
+		CLR R9			* X starts at 0
+XLP
+		CLR R6			* zx=0
+		CLR R7			* zy=0
+		LI R8,14		* 15 colors to count down through
+
+* since all the multiplies are squares, we can throw away the sign to detect overflow more easily	
+CALCLP
+		MOV R6,R0
+		BL @SQUARE
+		CI R0,>FFFF		* already too big
+		JEQ ESCAPE
+		MOV R0,R4		* zx*zx
+		
+		MOV R7,R0
+		BL @SQUARE
+		CI R0,>FFFF
+		JEQ ESCAPE
+		MOV R0,R5		* zy*zy
+		
+		SRL R0,5		* make into 8.8 for easier add
+		MOV R4,R1
+		SRL R1,5
+		A R1,R0			* add to range check
+		CI R0,>0400		* check if greater than 4.0
+		JHE ESCAPE
+		
+* did not escape, so prepare next iteration
+		DEC R8
+		JEQ ESCAPE		* out of iterations
+
+		MOV R4,R0		* zx*zx
+		S R5,R0			* zx*zx - zy*zy (R5 is now free)
+		A R12,R0		* zx*zx - zy*zy + cx
+		
+		CLR R5			* sign flag for mpy
+		MOV R6,R1		* zx
+		COC @SIGNF,R1
+		JNE NONEGX
+		INV R5
+		ABS R1
+NONEGX
+		MOV R7,R2		* zy
+		COC @SIGNF,R2
+		JNE NONEGY
+		INV R5
+		ABS R2
+NONEGY
+		MPY R2,R1		* zx*zy in R1,R2, 26 bit exponent, should not wrap
+		SRL R2,13		* get lowest 3 bits
+		SLA R1,3		* shift up to receive
+		SOC R2,R1		* merge into R1 - zx*zy (excluding sign)
+		SLA R1,1		* zx*zy*2 (excluding sign)
+		MOV R5,R5		* check sign
+		JEQ NOSIGN
+		NEG R1
+NOSIGN
+		A R13,R1		* Add in cy
+		MOV R1,R7		* store in zy
+		MOV R0,R6		* and save zx too
+		
+		JMP CALCLP		* try again!
+		
+ESCAPE
+		BL @PIXEL		* (R9=X, R10=Y, R8=color)
+		A R14,R12		* cx += scalex
+		INC R9			* x pixel
+		CI R9,>0100
+		JNE XLP
+		
+		A R15,R13		* cy += scaley
+		INC R10
+		CI R10,192
+		JNE YLP
+		
+* That's it!
+		MOV @SAVERT,R11
+		MOV @SAVEL,R12
+		MOV @SAVET,R13
+		MOV @SAVEX,R14
+		MOV @SAVEY,R15
+		B *R11
+		
+BITS	DATA >8040,>2010,>0804,>0201		
+		
+PIXEL
+* Draw pixel at R9,R10 with color R8 
+* This version tries to fix colors by caching locally. it is based on the assumption
+* that the image is drawn left to right. Color 0 has high priority and if set, will override
+* any other pixels already set (to make the set itself stand out)
+		MOV R8,R8		* check for black
+		JEQ PFIXUP		* make sure colors are right and exit if so
+		
+		INC R8			* make real color
+		SLA R8,12		* get into high nibble
+		MOV @CACHE,R3	* get cache
+		MOV R3,R0
+		ANDI R0,>F000
+		CI R0,>1000		* not set yet?
+		JEQ SETFG
+		C R0,R8			* foreground color
+		JEQ SETFG
+		MOV R3,R0
+		ANDI R0,>0F00
+		JEQ SETFG		* if background color is black, set foreground
+		SRL R8,4		* otherwise we will set the background color and leave this cleared
+		ANDI R3,>F0FF
+		SOCB R8,R3		* set color
+		JMP CTEST
+SETFG		
+		ANDI R3,>0FFF
+		SOCB R8,R3		* set color
+		MOV R9,R2
+		ANDI R2,7
+		MOVB @BITS(R2),R2	* make bit pattern
+		SWPB R2
+		MOVB @SIGNF+1,R2	* zero top byte
+		SOC R2,R3		* set pixel
+		JMP CTEST
+PFIXUP
+		MOV @CACHE,R3
+		MOV R3,R0
+		ANDI R0,>0F00
+		JEQ CTEST		* already zeroed
+		ANDI R3,>00FF	* prepare to swap colors and zero BG
+		SLA R0,4		* get last color in foreground
+		SOCB R0,R3		* set it
+		MOV R9,R1		* get X
+		ANDI R1,7		* pixel offset
+		JEQ CTEST		* no pixels to fix
+		LI R2,>0080
+PFIXLP
+		SOC R2,R3		* set pix
+		SRL R2,1		* shift mask
+		DEC R1			* count down
+		JNE PFIXLP
+CTEST		
+		MOV R9,R0		* get X
+		ANDI R0,7		* pixel
+		CI R0,7			* last one?
+		JNE WRBACK		* skip if not
+		
+		SWPB R3			* get pattern table byte first
+
+		MOV R10,R0		* work Y
+		SLA R0,5
+		SOC R10,R0
+		ANDI R0,>FF07
+		MOV R9,R2		* work X
+		ANDI R2,7
+		A R9,R0
+		S R2,R0			* R0=offset, R2=bit (don't need bit)
+		
+		MOV R11,R2		* save return
+		ORI R0,>4000	* make write address
+		BL @VWAD
+		MOVB R3,@>8C00	* write pattern
+		AI R0,>2000		* get write address for color
+		SWPB R3			* get color first
+		BL @VWAD
+		MOVB R3,@>8C00	* write color
+		LI R3,>1100		* reset r3
+		MOV R2,R11		* put return address back
+WRBACK
+		MOV R3,@CACHE
+		B *R11
+		
+		END
