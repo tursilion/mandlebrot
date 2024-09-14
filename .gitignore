@@ -1,2 +1,7 @@
 *.lst
 *.obj
+*.ihx
+*.lk
+*.map
+*.noi
+*.sym
